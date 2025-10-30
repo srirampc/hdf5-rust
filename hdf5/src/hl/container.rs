@@ -38,8 +38,11 @@ impl<'a> Reader<'a> {
         self
     }
 
-    fn read_into_buf<T: H5Type>(
-        &self, buf: *mut T, fspace: Option<&Dataspace>, mspace: Option<&Dataspace>,
+    fn __read_into_buf<T: H5Type>(
+        &self, buf: *mut T,
+        fspace: Option<&Dataspace>,
+        mspace: Option<&Dataspace>,
+        use_mpio: Option<bool>,
     ) -> Result<()> {
         let file_dtype = self.obj.dtype()?;
         let mem_dtype = Datatype::from_type::<T>()?;
@@ -56,9 +59,23 @@ impl<'a> Reader<'a> {
             if !hdf5_types::USING_H5_ALLOCATOR {
                 crate::hl::plist::set_vlen_manager_libc(xfer.id())?;
             }
+            #[cfg(feature = "mpio")]
+            {
+                if use_mpio.unwrap_or(false) {
+                    crate::hl::plist::set_dxpl_mpio(xfer.id())?;
+                }
+            }
             h5try!(H5Dread(obj_id, tp_id, mspace_id, fspace_id, xfer.id(), buf.cast()));
         }
         Ok(())
+    }
+
+    fn read_into_buf<T: H5Type>(
+        &self, buf: *mut T,
+        fspace: Option<&Dataspace>,
+        mspace: Option<&Dataspace>,
+    ) -> Result<()> {
+        self.__read_into_buf(buf, fspace, mspace, None)
     }
 
     /// Reads a slice of an n-dimensional array.
@@ -66,7 +83,11 @@ impl<'a> Reader<'a> {
     /// the slice, after singleton dimensions are dropped.
     /// Use the multi-dimensional slice macro `s![]` from `ndarray` to conveniently create
     /// a multidimensional slice.
-    pub fn read_slice<T, S, D>(&self, selection: S) -> Result<Array<T, D>>
+    fn __read_slice<T, S, D>(
+        &self,
+        selection: S,
+        use_mpio: Option<bool>
+    ) -> Result<Array<T, D>>
     where
         T: H5Type,
         S: TryInto<Selection>,
@@ -102,13 +123,43 @@ impl<'a> Reader<'a> {
         } else {
             let mspace = Dataspace::try_new(&out_shape)?;
             let mut buf = Vec::with_capacity(out_size);
-            self.read_into_buf(buf.as_mut_ptr(), Some(&fspace), Some(&mspace))?;
+            self.__read_into_buf(buf.as_mut_ptr(), Some(&fspace), Some(&mspace), use_mpio)?;
             unsafe {
                 buf.set_len(out_size);
             };
             let arr = ArrayD::from_shape_vec(out_shape, buf)?;
             Ok(arr.into_dimensionality()?)
         }
+    }
+    /// Collectively reads a slice of an n-dimensional array.
+    /// If the dimensionality `D` has a fixed number of dimensions, it must match the dimensionality of
+    /// the slice, after singleton dimensions are dropped.
+    /// Use the multi-dimensional slice macro `s![]` from `ndarray` to conveniently create
+    /// a multidimensional slice.
+    #[cfg(feature = "mpio")]
+    pub fn coll_read_slice<T, S, D>(&self, selection: S) -> Result<Array<T, D>>
+    where
+        T: H5Type,
+        S: TryInto<Selection>,
+        Error: From<S::Error>,
+        D: ndarray::Dimension,
+    {
+        self.__read_slice(selection, Some(true))
+    }
+
+    /// Reads a slice of an n-dimensional array.
+    /// If the dimensionality `D` has a fixed number of dimensions, it must match the dimensionality of
+    /// the slice, after singleton dimensions are dropped.
+    /// Use the multi-dimensional slice macro `s![]` from `ndarray` to conveniently create
+    /// a multidimensional slice.
+    pub fn read_slice<T, S, D>(&self, selection: S) -> Result<Array<T, D>>
+    where
+        T: H5Type,
+        S: TryInto<Selection>,
+        Error: From<S::Error>,
+        D: ndarray::Dimension,
+    {
+        self.__read_slice(selection, None)
     }
 
     /// Reads a dataset/attribute into an n-dimensional array.
@@ -156,6 +207,18 @@ impl<'a> Reader<'a> {
         self.read_slice(selection)
     }
 
+    /// Collectivte read the given `slice` of the dataset into a 1-dimensional array.
+    /// The slice must yield a 1-dimensional result.
+    #[cfg(feature = "mpio")]
+    pub fn coll_read_slice_1d<T, S>(&self, selection: S) -> Result<Array1<T>>
+    where
+        T: H5Type,
+        S: TryInto<Selection>,
+        Error: From<S::Error>,
+    {
+        self.__read_slice(selection, Some(true))
+    }
+
     /// Reads a dataset/attribute into a 2-dimensional array.
     ///
     /// The dataset/attribute must be 2-dimensional.
@@ -172,6 +235,18 @@ impl<'a> Reader<'a> {
         Error: From<S::Error>,
     {
         self.read_slice(selection)
+    }
+
+    /// Collective read the given `slice` of the dataset into a 2-dimensional array.
+    /// The slice must yield a 2-dimensional result.
+    #[cfg(feature = "mpio")]
+    pub fn coll_read_slice_2d<T, S>(&self, selection: S) -> Result<Array2<T>>
+    where
+        T: H5Type,
+        S: TryInto<Selection>,
+        Error: From<S::Error>,
+    {
+        self.__read_slice(selection, Some(true))
     }
 
     /// Reads a dataset/attribute into an array with dynamic number of dimensions.
@@ -214,8 +289,12 @@ impl<'a> Writer<'a> {
         self
     }
 
-    fn write_from_buf<T: H5Type>(
-        &self, buf: *const T, fspace: Option<&Dataspace>, mspace: Option<&Dataspace>,
+    fn __write_from_buf<T: H5Type>(
+        &self, 
+        buf: *const T,
+        fspace: Option<&Dataspace>,
+        mspace: Option<&Dataspace>,
+        use_mpio: Option<bool>,
     ) -> Result<()> {
         let file_dtype = self.obj.dtype()?;
         let mem_dtype = Datatype::from_type::<T>()?;
@@ -227,9 +306,24 @@ impl<'a> Writer<'a> {
         } else {
             let fspace_id = fspace.map_or(H5S_ALL, |f| f.id());
             let mspace_id = mspace.map_or(H5S_ALL, |m| m.id());
-            h5try!(H5Dwrite(obj_id, tp_id, mspace_id, fspace_id, H5P_DEFAULT, buf.cast()));
+            let xfer =
+                PropertyList::from_id(h5call!(H5Pcreate(*crate::globals::H5P_DATASET_XFER))?)?;
+            #[cfg(feature = "mpio")]
+            if use_mpio.unwrap_or(false) {
+                crate::hl::plist::set_dxpl_mpio(xfer.id())?;
+            }
+            h5try!(H5Dwrite(obj_id, tp_id, mspace_id, fspace_id, xfer.id(), buf.cast()));
         }
         Ok(())
+    }
+
+    fn write_from_buf<T: H5Type>(
+        &self, 
+        buf: *const T,
+        fspace: Option<&Dataspace>,
+        mspace: Option<&Dataspace>,
+    ) -> Result<()> {
+        self.__write_from_buf(buf, fspace, mspace, None)
     }
 
     /// Writes all data from the array `arr` into the given `slice` of the target dataset.
@@ -237,7 +331,11 @@ impl<'a> Writer<'a> {
     /// If the array has a fixed number of dimensions, it must match the dimensionality of
     /// dataset. Use the multi-dimensional slice macro `s![]` from `ndarray` to conveniently create
     /// a multidimensional slice.
-    pub fn write_slice<'b, A, T, S, D>(&self, arr: A, selection: S) -> Result<()>
+    fn __write_slice<'b, A, T, S, D>(
+        &self, arr: A,
+        selection: S,
+        use_mpio: Option<bool>,
+    ) -> Result<()>
     where
         A: Into<ArrayView<'b, T, D>>,
         T: H5Type,
@@ -286,9 +384,34 @@ impl<'a> Writer<'a> {
                 "Input array is not in standard layout or non-contiguous"
             );
 
-            self.write_from_buf(view.as_ptr(), Some(&fspace), Some(&mspace))
+            self.__write_from_buf(view.as_ptr(), Some(&fspace),
+                                     Some(&mspace), use_mpio)
         }
     }
+
+    #[cfg(feature = "mpio")]
+    pub fn coll_write_slice<'b, A, T, S, D>(&self, arr: A, selection: S) -> Result<()>
+    where
+        A: Into<ArrayView<'b, T, D>>,
+        T: H5Type,
+        S: TryInto<Selection>,
+        Error: From<S::Error>,
+        D: ndarray::Dimension,
+    {
+        self.__write_slice(arr, selection, Some(true))
+    }
+
+    pub fn write_slice<'b, A, T, S, D>(&self, arr: A, selection: S) -> Result<()>
+    where
+        A: Into<ArrayView<'b, T, D>>,
+        T: H5Type,
+        S: TryInto<Selection>,
+        Error: From<S::Error>,
+        D: ndarray::Dimension,
+    {
+        self.__write_slice(arr, selection, None)
+    }
+ 
 
     /// Writes an n-dimensional array view into a dataset/attribute.
     ///

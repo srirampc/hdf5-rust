@@ -9,6 +9,13 @@ use hdf5_sys::h5p::{
     H5Piterate, H5Pset_vlen_mem_manager,
 };
 
+#[cfg(feature = "mpio")]
+use hdf5_sys::h5p::H5Pset_dxpl_mpio;
+
+#[cfg(feature = "mpio")]
+use hdf5_sys::h5p::H5FD_mpio_xfer_t::H5FD_MPIO_COLLECTIVE;
+
+
 use crate::internal_prelude::*;
 
 pub mod common;
@@ -256,6 +263,17 @@ pub fn set_vlen_manager_libc(plist: hid_t) -> Result<()> {
         ptr::null_mut(),
         Some(free),
         ptr::null_mut()
+    ));
+    Ok(())
+}
+
+/// Set data transfer
+// TODO: move this to dataset_transfer module when DatasetTransfer plist is implemented
+#[cfg(feature = "mpio")]
+pub fn set_dxpl_mpio(plist: hid_t) -> Result<()> {
+    h5try!(H5Pset_dxpl_mpio(
+        plist,
+        H5FD_MPIO_COLLECTIVE
     ));
     Ok(())
 }
