@@ -38,11 +38,26 @@ impl<'a> Reader<'a> {
         self
     }
 
+    fn build_read_xfer_plist(&self, use_mpio: Option<bool>) -> Result<PropertyList> {
+        let xfer =
+          PropertyList::from_id(h5call!(H5Pcreate(*crate::globals::H5P_DATASET_XFER))?)?;
+        if !hdf5_types::USING_H5_ALLOCATOR {
+          crate::hl::plist::set_vlen_manager_libc(xfer.id())?;
+        }
+        #[cfg(feature = "mpio")]
+        {
+           if use_mpio.unwrap_or(false) {
+               crate::hl::plist::set_dxpl_mpio(xfer.id())?;
+           }
+        }
+        Ok(xfer)
+    }
+
     fn __read_into_buf<T: H5Type>(
         &self, buf: *mut T,
         fspace: Option<&Dataspace>,
         mspace: Option<&Dataspace>,
-        use_mpio: Option<bool>,
+        dxpl: Option<PropertyList>,
     ) -> Result<()> {
         let file_dtype = self.obj.dtype()?;
         let mem_dtype = Datatype::from_type::<T>()?;
@@ -54,17 +69,20 @@ impl<'a> Reader<'a> {
         } else {
             let fspace_id = fspace.map_or(H5S_ALL, |f| f.id());
             let mspace_id = mspace.map_or(H5S_ALL, |m| m.id());
-            let xfer =
-                PropertyList::from_id(h5call!(H5Pcreate(*crate::globals::H5P_DATASET_XFER))?)?;
-            if !hdf5_types::USING_H5_ALLOCATOR {
-                crate::hl::plist::set_vlen_manager_libc(xfer.id())?;
-            }
-            #[cfg(feature = "mpio")]
-            {
-                if use_mpio.unwrap_or(false) {
-                    crate::hl::plist::set_dxpl_mpio(xfer.id())?;
-                }
-            }
+            let xfer = match dxpl {
+                None => self.build_read_xfer_plist(None)?,
+                Some(xpl) => xpl,
+            };
+            //    PropertyList::from_id(h5call!(H5Pcreate(*crate::globals::H5P_DATASET_XFER))?)?;
+            //if !hdf5_types::USING_H5_ALLOCATOR {
+            //    crate::hl::plist::set_vlen_manager_libc(xfer.id())?;
+            //}
+            //#[cfg(feature = "mpio")]
+            //{
+            //    if use_mpio.unwrap_or(false) {
+            //        crate::hl::plist::set_dxpl_mpio(xfer.id())?;
+            //    }
+            //}
             h5try!(H5Dread(obj_id, tp_id, mspace_id, fspace_id, xfer.id(), buf.cast()));
         }
         Ok(())
@@ -86,7 +104,7 @@ impl<'a> Reader<'a> {
     fn __read_slice<T, S, D>(
         &self,
         selection: S,
-        use_mpio: Option<bool>
+        dxpl: Option<PropertyList>,
     ) -> Result<Array<T, D>>
     where
         T: H5Type,
@@ -123,7 +141,7 @@ impl<'a> Reader<'a> {
         } else {
             let mspace = Dataspace::try_new(&out_shape)?;
             let mut buf = Vec::with_capacity(out_size);
-            self.__read_into_buf(buf.as_mut_ptr(), Some(&fspace), Some(&mspace), use_mpio)?;
+            self.__read_into_buf(buf.as_mut_ptr(), Some(&fspace), Some(&mspace), dxpl)?;
             unsafe {
                 buf.set_len(out_size);
             };
@@ -144,7 +162,10 @@ impl<'a> Reader<'a> {
         Error: From<S::Error>,
         D: ndarray::Dimension,
     {
-        self.__read_slice(selection, Some(true))
+        self.__read_slice(
+            selection,
+            Some(self.build_read_xfer_plist(Some(true))?)
+        )
     }
 
     /// Reads a slice of an n-dimensional array.
@@ -216,7 +237,10 @@ impl<'a> Reader<'a> {
         S: TryInto<Selection>,
         Error: From<S::Error>,
     {
-        self.__read_slice(selection, Some(true))
+        self.__read_slice(
+            selection,
+            Some(self.build_read_xfer_plist(Some(true))?)
+        )
     }
 
     /// Reads a dataset/attribute into a 2-dimensional array.
@@ -246,7 +270,10 @@ impl<'a> Reader<'a> {
         S: TryInto<Selection>,
         Error: From<S::Error>,
     {
-        self.__read_slice(selection, Some(true))
+        self.__read_slice(
+            selection,
+            Some(self.build_read_xfer_plist(Some(true))?),
+        )
     }
 
     /// Reads a dataset/attribute into an array with dynamic number of dimensions.
@@ -289,12 +316,24 @@ impl<'a> Writer<'a> {
         self
     }
 
+    fn build_write_xfer_plist(&self, use_mpio: Option<bool>) -> Result<PropertyList> {
+        let xfer =
+          PropertyList::from_id(h5call!(H5Pcreate(*crate::globals::H5P_DATASET_XFER))?)?;
+        #[cfg(feature = "mpio")]
+        {
+           if use_mpio.unwrap_or(false) {
+               crate::hl::plist::set_dxpl_mpio(xfer.id())?;
+           }
+        }
+        Ok(xfer)
+    }
+
     fn __write_from_buf<T: H5Type>(
         &self, 
         buf: *const T,
         fspace: Option<&Dataspace>,
         mspace: Option<&Dataspace>,
-        use_mpio: Option<bool>,
+        dxpl: Option<PropertyList>,
     ) -> Result<()> {
         let file_dtype = self.obj.dtype()?;
         let mem_dtype = Datatype::from_type::<T>()?;
@@ -306,12 +345,17 @@ impl<'a> Writer<'a> {
         } else {
             let fspace_id = fspace.map_or(H5S_ALL, |f| f.id());
             let mspace_id = mspace.map_or(H5S_ALL, |m| m.id());
-            let xfer =
-                PropertyList::from_id(h5call!(H5Pcreate(*crate::globals::H5P_DATASET_XFER))?)?;
-            #[cfg(feature = "mpio")]
-            if use_mpio.unwrap_or(false) {
-                crate::hl::plist::set_dxpl_mpio(xfer.id())?;
-            }
+            let xfer = match dxpl {
+                None => self.build_write_xfer_plist(None)?,
+                Some(xpl) => xpl,
+            };
+
+            //let xfer =
+            //    PropertyList::from_id(h5call!(H5Pcreate(*crate::globals::H5P_DATASET_XFER))?)?;
+            //#[cfg(feature = "mpio")]
+            //if use_mpio.unwrap_or(false) {
+            //    crate::hl::plist::set_dxpl_mpio(xfer.id())?;
+            //}
             h5try!(H5Dwrite(obj_id, tp_id, mspace_id, fspace_id, xfer.id(), buf.cast()));
         }
         Ok(())
@@ -334,7 +378,7 @@ impl<'a> Writer<'a> {
     fn __write_slice<'b, A, T, S, D>(
         &self, arr: A,
         selection: S,
-        use_mpio: Option<bool>,
+        dxpl: Option<PropertyList>,
     ) -> Result<()>
     where
         A: Into<ArrayView<'b, T, D>>,
@@ -385,7 +429,7 @@ impl<'a> Writer<'a> {
             );
 
             self.__write_from_buf(view.as_ptr(), Some(&fspace),
-                                     Some(&mspace), use_mpio)
+                                  Some(&mspace), dxpl)
         }
     }
 
@@ -398,7 +442,11 @@ impl<'a> Writer<'a> {
         Error: From<S::Error>,
         D: ndarray::Dimension,
     {
-        self.__write_slice(arr, selection, Some(true))
+        self.__write_slice(
+            arr,
+            selection,
+            Some(self.build_write_xfer_plist(Some(true))?)
+        )
     }
 
     pub fn write_slice<'b, A, T, S, D>(&self, arr: A, selection: S) -> Result<()>
