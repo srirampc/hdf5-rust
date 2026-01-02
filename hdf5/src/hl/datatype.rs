@@ -62,7 +62,26 @@ impl ObjectClass for Datatype {
         &self.0
     }
 
-    // TODO: short_repr()
+    fn short_repr(&self) -> Option<String> {
+        let repr = match self.to_descriptor() {
+            Ok(s) => s.to_string(),
+            Err(e) => {
+                // Fallback: show basic HDF5 info if descriptor conversion fails
+                h5lock!({
+                    let class = H5Tget_class(self.id());
+                    let size = H5Tget_size(self.id());
+                    format!("Invalid datatype: {e} <HDF5 id: {class:?} size: {size}>)")
+                })
+            }
+        };
+        Some(repr)
+    }
+}
+
+impl Display for Datatype {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "{}", self.short_repr().expect("short_repr is always implemented"))
+    }
 }
 
 impl Debug for Datatype {
@@ -85,10 +104,14 @@ impl PartialEq for Datatype {
     }
 }
 
+/// A level of possible conversion between two types.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Conversion {
+    /// No conversion.
     NoOp = 1, // TODO: rename to "None"?
+    /// Functions employing compiler casting.
     Hard,
+    /// Functions not employing compiler casting.
     Soft,
 }
 
@@ -120,12 +143,18 @@ impl Default for Conversion {
     }
 }
 
+/// The byte order of a datatype.
 #[derive(Copy, Debug, Clone, PartialEq, Eq)]
 pub enum ByteOrder {
+    /// Little endian.
     LittleEndian,
+    /// Big endian.
     BigEndian,
+    /// VAX mixed endian.
     Vax,
+    /// Compound type with mixed member orders.
     Mixed,
+    /// No particular order.
     None,
 }
 
@@ -166,6 +195,7 @@ impl Datatype {
         h5lock!(H5Tget_order(self.id())).into()
     }
 
+    /// Returns the conversion function level from `self` to `dst`, if one exists.
     pub fn conv_path<D>(&self, dst: D) -> Option<Conversion>
     where
         D: Borrow<Self>,
@@ -187,33 +217,32 @@ impl Datatype {
         })
     }
 
+    /// Returns the conversion function level from `self` to a concrete type, if one exists.
     pub fn conv_to<T: H5Type>(&self) -> Option<Conversion> {
         Self::from_type::<T>().ok().and_then(|dtype| self.conv_path(dtype))
     }
 
+    /// Returns the conversion function level from a concrete type to `self`, if one exists.
     pub fn conv_from<T: H5Type>(&self) -> Option<Conversion> {
         Self::from_type::<T>().ok().and_then(|dtype| dtype.conv_path(self))
     }
 
+    /// Returns `true` if `self` represents a concrete type.
     pub fn is<T: H5Type>(&self) -> bool {
         Self::from_type::<T>().ok().map_or(false, |dtype| &dtype == self)
     }
 
     pub(crate) fn ensure_convertible(&self, dst: &Self, required: Conversion) -> Result<()> {
-        // TODO: more detailed error messages after Debug/Display are implemented for Datatype
         if let Some(conv) = self.conv_path(dst) {
             ensure!(
-                conv <= required,
-                "{} conversion path required; available: {} conversion",
-                required,
-                conv
-            );
+                conv <= required, "Cannot convert from {self} to {dst}, required conversion {required}; available: {conv}",);
             Ok(())
         } else {
-            fail!("no conversion paths found")
+            fail!("no conversion paths found from '{self:#?}' to '{dst:#?}'",)
         }
     }
 
+    /// Returns a type descriptor for the datatype.
     pub fn to_descriptor(&self) -> Result<TypeDescriptor> {
         use hdf5_types::TypeDescriptor as TD;
 
@@ -307,10 +336,12 @@ impl Datatype {
         })
     }
 
+    /// Creates a datatype from a concrete type.
     pub fn from_type<T: H5Type>() -> Result<Self> {
         Self::from_descriptor(&<T as H5Type>::type_descriptor())
     }
 
+    /// Creates a datatype from a type descriptor.
     pub fn from_descriptor(desc: &TypeDescriptor) -> Result<Self> {
         use hdf5_types::TypeDescriptor as TD;
 
@@ -425,5 +456,36 @@ impl Datatype {
         });
 
         Self::from_id(datatype_id?)
+    }
+}
+
+/// NOTE: tests of public functions are in hdf5/tests/test_datatype.rs
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use hdf5_types::{FixedAscii, FixedUnicode};
+    use pretty_assertions::assert_str_eq;
+
+    #[test]
+    fn test_ensure_convertible_fail_err_msg() {
+        const SIZE: usize = 10;
+        let src = Datatype::from_type::<FixedUnicode<SIZE>>().unwrap();
+        let dst = Datatype::from_type::<FixedAscii<SIZE>>().unwrap();
+
+        let err_msg = src.ensure_convertible(&dst, Conversion::NoOp).unwrap_err().to_string();
+
+        assert_str_eq!(err_msg, "no conversion paths found from '<HDF5 datatype: unicode (len 10)>' to '<HDF5 datatype: string (len 10)>'");
+    }
+
+    #[test]
+    fn test_ensure_convertible_failed_required_conversion_hard_err_msg() {
+        let src = Datatype::from_type::<u64>().unwrap();
+        let dst = Datatype::from_type::<i64>().unwrap();
+
+        let err_msg = src.ensure_convertible(&dst, Conversion::NoOp).unwrap_err().to_string();
+        assert_str_eq!(
+            err_msg,
+            "Cannot convert from uint64 to int64, required conversion no-op; available: hard"
+        );
     }
 }

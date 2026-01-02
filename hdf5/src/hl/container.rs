@@ -12,6 +12,7 @@ use hdf5_sys::h5p::H5Pcreate;
 
 use crate::internal_prelude::*;
 
+/// A type for reading data from a [`Container`].
 #[derive(Debug)]
 pub struct Reader<'a> {
     obj: &'a Container,
@@ -290,6 +291,7 @@ impl<'a> Reader<'a> {
     }
 }
 
+/// A type for writing data into a [`Container`].
 #[derive(Debug)]
 pub struct Writer<'a> {
     obj: &'a Container,
@@ -518,6 +520,7 @@ impl<'a> Writer<'a> {
     }
 }
 
+/// A reader for a 1-dimensional dataset of bytes.
 #[derive(Debug, Clone)]
 pub struct ByteReader {
     obj: Container,
@@ -528,6 +531,14 @@ pub struct ByteReader {
 }
 
 impl ByteReader {
+    /// Creates a new `ByteReader` for the given [`Container`].
+    ///
+    /// # Panics
+    /// Panics if `obj` is not 1-dimensional.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `obj` does not contain bytes or if the underlying library calls fail.
     pub fn new(obj: &Container) -> Result<Self> {
         ensure!(!obj.is_attr(), "ByteReader cannot be used on attribute datasets");
 
@@ -553,6 +564,7 @@ impl ByteReader {
         self.dataset_len().saturating_sub(self.pos as usize)
     }
 
+    /// Returns `true` if the reader has no more bytes to read.
     pub fn is_empty(&self) -> bool {
         self.pos >= self.dataset_len() as u64
     }

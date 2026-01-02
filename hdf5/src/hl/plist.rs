@@ -24,6 +24,7 @@ pub mod dataset_create;
 pub mod file_access;
 pub mod file_create;
 pub mod link_create;
+pub mod object_copy;
 
 /// Represents the HDF5 property list.
 #[repr(transparent)]
@@ -100,7 +101,7 @@ pub enum PropertyListClass {
     LinkCreate,
     /// Properties for object copying process.
     ObjectCopy,
-    /// Properties for object creatio.
+    /// Properties for object creation.
     ObjectCreate,
     /// Properties for character encoding.
     StringCreate,
@@ -217,6 +218,7 @@ impl PropertyList {
         })
     }
 
+    /// Returns `true` if the property list is a member of `class`.
     pub fn is_class(&self, class: PropertyListClass) -> bool {
         use crate::globals::*;
         h5lock!({
